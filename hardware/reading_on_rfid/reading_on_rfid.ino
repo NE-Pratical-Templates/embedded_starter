@@ -33,9 +33,9 @@ void loop(){
 
     Serial.println();
     Serial.println(F("===== Card Info ====="));
-    Serial.print(F("🚗 Car Plate : "));
+    Serial.print(F("🚐 Car Plate : "));
     Serial.println(carPlate);
-    Serial.print(F("💰 Balance    : "));
+    Serial.print(F("💸 Balance    : "));
     Serial.println(balance);
     Serial.println(F("====================="));
     Serial.println();

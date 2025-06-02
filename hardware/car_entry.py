@@ -49,8 +49,56 @@ def has_unpaid_record(plate):
         print(f"Database error: {e}")
         return False
 
+def has_active_entry(plate):
+    """Check if car has an active entry without exit"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COUNT(*) 
+                    FROM parking_entries 
+                    WHERE car_plate = %s 
+                    AND exit_time IS NULL
+                """, (plate,))
+                count = cur.fetchone()[0]
+                return count > 0
+    except Exception as e:
+        print(f"[DATABASE ERROR] Active entry check failed: {e}")
+        return False
+
+def log_security_incident(plate, incident_type, description):
+    """Log security incidents in the database"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO security_incidents 
+                    (car_plate, incident_type, incident_time, description)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id
+                """, (plate, incident_type, datetime.now(), description))
+                incident_id = cur.fetchone()[0]
+                conn.commit()
+                print(f"[SECURITY] Logged incident #{incident_id} for {plate}: {description}")
+                return incident_id
+    except Exception as e:
+        print(f"[DATABASE ERROR] Failed to log security incident: {e}")
+        return None
+
 def save_entry(plate):
     try:
+        # First check if car has an active entry
+        if has_active_entry(plate):
+            print(f"[SECURITY ALERT] Attempted double entry by {plate}")
+            # Log security incident
+            log_security_incident(
+                plate,
+                "DOUBLE_ENTRY_ATTEMPT",
+                f"Vehicle {plate} attempted to enter while having an active entry"
+            )
+            return None
+
+        # If no active entry, proceed with normal entry
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -65,7 +113,7 @@ def save_entry(plate):
                 conn.commit()
                 return entry_id
     except Exception as e:
-        print(f"Database error: {e}")
+        print(f"[DATABASE ERROR] {e}")
         return None
 
 # Rest of the Arduino detection code remains the same
@@ -116,6 +164,72 @@ last_entry_time = 0
 
 print("[SYSTEM] Ready. Press 'q' to exit.")
 
+# Update the main loop section where entry is handled
+def handle_entry(common, arduino):
+    """Handle the entry process for a detected plate"""
+    now = time.time()
+    
+    if has_active_entry(common):
+        print(f"[SECURITY ALERT] Double entry attempt: {common}")
+        
+        # Log security incident in database
+        incident_id = log_security_incident(
+            common,
+            "DOUBLE_ENTRY_ATTEMPT",
+            f"Vehicle {common} attempted to enter while already inside parking"
+        )
+        
+        # Trigger alarm pattern for double entry attempt
+        if arduino:
+            print("[ALARM] Triggering security alarm")
+            # Create distinctive alarm pattern for double entry
+            for _ in range(4):  # Four alarm bursts
+                arduino.write(b'1')  # Open gate (triggers buzzer)
+                time.sleep(0.3)     # Short beep
+                arduino.write(b'0')  # Close gate (stops buzzer)
+                time.sleep(0.2)     # Short pause
+                
+        # If we need to track additional security details
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Get the active entry details for reference
+                    cur.execute("""
+                        SELECT entry_time, payment_status
+                        FROM parking_entries
+                        WHERE car_plate = %s AND exit_time IS NULL
+                        ORDER BY entry_time DESC LIMIT 1
+                    """, (common,))
+                    active_entry = cur.fetchone()
+                    
+                    if active_entry:
+                        entry_time, payment_status = active_entry
+                        # Update the security incident with more details if needed
+                        cur.execute("""
+                            UPDATE security_incidents
+                            SET additional_info = %s
+                            WHERE id = %s
+                        """, (
+                            f"Original entry time: {entry_time}, Payment status: {'Paid' if payment_status else 'Unpaid'}",
+                            incident_id
+                        ))
+                        conn.commit()
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to update security incident details: {e}")
+            
+        return False
+        
+    # If it's a new entry, proceed with normal entry process
+    if save_entry(common):
+        print(f"[NEW] Logged plate {common}")
+        if arduino:
+            arduino.write(b'1')
+            time.sleep(GATE_OPEN_TIME)
+            arduino.write(b'0')
+        return True
+    return False
+
+# Update the relevant part in the main loop
 try:
     while True:
         ret, frame = cap.read()
@@ -163,34 +277,12 @@ try:
                     common = Counter(plate_buffer).most_common(1)[0][0]
                     now = time.time()
 
-                    # Only save if not duplicate unpaid
-                    if not has_unpaid_record(common):
-                        # Optional cool-down logic still applies
-                        if (
-                            common != last_saved_plate
-                            or (now - last_entry_time) > ENTRY_COOLDOWN
-                        ):
-                            if save_entry(common):
-                                print(f"[NEW] Logged plate {common}")
-
-                                # Gate actuation
-                                if arduino:
-                                    arduino.write(b"1")
-                                    time.sleep(GATE_OPEN_TIME)
-                                    arduino.write(b"0")
-
-                                last_saved_plate = common
-                                last_entry_time = now
-                        else:
-                            print(f"[SKIPPED] Cooldown: {common}")
-                    else:
-                        print(f"[SYSTEM TERMINATED] Unpaid record exists for {common}")
-                        cap.release()
-                        if arduino:
-                            arduino.close()
-                        cv2.destroyAllWindows()
-                        exit(0)
-
+                    # Handle the entry with new function
+                    entry_success = handle_entry(common, arduino)
+                    if entry_success:
+                        last_saved_plate = common
+                        last_entry_time = now
+            
                     plate_buffer.clear()
 
                 # Show previews
