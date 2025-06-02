@@ -8,37 +8,67 @@ import serial
 import serial.tools.list_ports
 import csv
 from collections import Counter
+import psycopg2
+from datetime import datetime
 
 # Load YOLOv8 model
 model = YOLO("../model_dev/runs/detect/train/weights/best.pt")
 
 # Configurations
 SAVE_DIR = "plates"
-CSV_FILE = "db.csv"
+DB_CONFIG = {
+    "dbname": "parking_system",
+    "user": "jodos",
+    "password": "jodos",
+    "host": "localhost",
+    "port": "5432"
+}
 ENTRY_COOLDOWN = 300  # seconds
 MAX_DISTANCE = 50  # cm
 MIN_DISTANCE = 0  # cm
 CAPTURE_THRESHOLD = 3  # number of consistent reads before logging
 GATE_OPEN_TIME = 15  # seconds
 
-# Ensure directories and CSV exist
+# Ensure directories exist
 os.makedirs(SAVE_DIR, exist_ok=True)
-if not os.path.exists(CSV_FILE):
-    with open(CSV_FILE, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(
-            [
-                "no",
-                "entry_time",
-                "exit_time",
-                "car_plate",
-                "due payment",
-                "payment status",
-            ]
-        )
 
+def get_db_connection():
+    return psycopg2.connect(**DB_CONFIG)
 
-# Auto-detect Arduino Serial Port
+def has_unpaid_record(plate):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM parking_entries WHERE car_plate = %s AND payment_status = FALSE",
+                    (plate,)
+                )
+                count = cur.fetchone()[0]
+                return count > 0
+    except Exception as e:
+        print(f"Database error: {e}")
+        return False
+
+def save_entry(plate):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO parking_entries (entry_time, car_plate, payment_status)
+                    VALUES (%s, %s, FALSE)
+                    RETURNING id
+                    """,
+                    (datetime.now(), plate)
+                )
+                entry_id = cur.fetchone()[0]
+                conn.commit()
+                return entry_id
+    except Exception as e:
+        print(f"Database error: {e}")
+        return None
+
+# Rest of the Arduino detection code remains the same
 def detect_arduino_port():
     for port in serial.tools.list_ports.comports():
         dev = port.device
@@ -50,8 +80,6 @@ def detect_arduino_port():
             return dev
     return None
 
-
-# Read distance from Arduino (returns float or None)
 def read_distance(arduino):
     if not arduino or arduino.in_waiting == 0:
         return None
@@ -60,18 +88,6 @@ def read_distance(arduino):
         return float(val)
     except (UnicodeDecodeError, ValueError):
         return None
-
-
-# Check for existing unpaid entry in CSV
-def has_unpaid_record(plate):
-    with open(CSV_FILE, "r", newline="") as f:
-        reader = csv.reader(f)
-        next(reader, None)  # skip header
-        for row in reader:
-            if row[3] == plate and row[5] == "0":
-                return True
-    return False
-
 
 # Initialize Arduino
 arduino_port = detect_arduino_port()
@@ -97,7 +113,6 @@ cv2.resizeWindow("Webcam Feed", 800, 600)
 plate_buffer = []
 last_saved_plate = None
 last_entry_time = 0
-entry_count = sum(1 for _ in open(CSV_FILE)) - 1
 
 print("[SYSTEM] Ready. Press 'q' to exit.")
 
@@ -108,7 +123,6 @@ try:
             print("[ERROR] Frame capture failed.")
             break
 
-        # Get distance reading, default to safe value
         distance = read_distance(arduino) or (MAX_DISTANCE - 1)
         annotated = frame.copy()
 
@@ -131,7 +145,7 @@ try:
                     pytesseract.image_to_string(
                         thresh,
                         config="--psm 8 --oem 3 "
-                               "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                        "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
                     )
                     .strip()
                     .replace(" ", "")
@@ -153,36 +167,29 @@ try:
                     if not has_unpaid_record(common):
                         # Optional cool-down logic still applies
                         if (
-                                common != last_saved_plate
-                                or (now - last_entry_time) > ENTRY_COOLDOWN
+                            common != last_saved_plate
+                            or (now - last_entry_time) > ENTRY_COOLDOWN
                         ):
-                            with open(CSV_FILE, "a", newline="") as f:
-                                writer = csv.writer(f)
-                                entry_count += 1
-                                writer.writerow(
-                                    [
-                                        entry_count,
-                                        time.strftime("%Y-%m-%d %H:%M:%S"),
-                                        "",
-                                        common,
-                                        "",
-                                        "0",
-                                    ]
-                                )
-                            print(f"[NEW] Logged plate {common}")
+                            if save_entry(common):
+                                print(f"[NEW] Logged plate {common}")
 
-                            # Gate actuation
-                            if arduino:
-                                arduino.write(b"1")
-                                time.sleep(GATE_OPEN_TIME)
-                                arduino.write(b"0")
+                                # Gate actuation
+                                if arduino:
+                                    arduino.write(b"1")
+                                    time.sleep(GATE_OPEN_TIME)
+                                    arduino.write(b"0")
 
-                            last_saved_plate = common
-                            last_entry_time = now
+                                last_saved_plate = common
+                                last_entry_time = now
                         else:
                             print(f"[SKIPPED] Cooldown: {common}")
                     else:
-                        print(f"[SKIPPED] Unpaid record exists for {common}")
+                        print(f"[SYSTEM TERMINATED] Unpaid record exists for {common}")
+                        cap.release()
+                        if arduino:
+                            arduino.close()
+                        cv2.destroyAllWindows()
+                        exit(0)
 
                     plate_buffer.clear()
 
