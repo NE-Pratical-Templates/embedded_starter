@@ -125,6 +125,16 @@ const Dashboard = () => {
   ).length;
 
   const initializeCharts = useCallback(() => {
+    const destroyChart = (ref: React.RefObject<ChartCanvas | null>) => {
+      if (ref.current && ref.current.chart) {
+        ref.current.chart.destroy();
+        ref.current.chart = undefined; // Clear the chart reference
+      }
+    };
+    destroyChart(pieChartRef);
+    destroyChart(barChartRef);
+    destroyChart(lineChartRef);
+    destroyChart(doughnutChartRef);
     // Payment Status Pie Chart
     if (pieChartRef.current) {
       const ctx = pieChartRef.current.getContext("2d");
@@ -294,22 +304,25 @@ const Dashboard = () => {
     totalIncidents,
     totalRevenue,
   ]);
-  useEffect(() => {
+useEffect(() => {
     if (activeTab === "analytics" && !loading && parkingEntries.length > 0) {
       initializeCharts();
     }
+
+    // Cleanup function to destroy charts when component unmounts or dependencies change
     return () => {
-      // Clean up charts when component unmounts or tab changes
-      [pieChartRef, barChartRef, lineChartRef, doughnutChartRef].forEach(
-        (ref) => {
-          if (ref.current?.chart) {
-            ref.current.chart.destroy();
-          }
+      const destroyChart = (ref: React.RefObject<ChartCanvas | null>) => {
+        if (ref.current?.chart) {
+          ref.current.chart.destroy();
+          ref.current.chart = undefined;
         }
-      );
+      };
+      destroyChart(pieChartRef);
+      destroyChart(barChartRef);
+      destroyChart(lineChartRef);
+      destroyChart(doughnutChartRef);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, loading, initializeCharts]);
+  }, [activeTab, loading, parkingEntries, initializeCharts]);
   const handleResolveIncident = (id: number) => {
     setSecurityIncidents((prev) =>
       prev.map((incident) =>
@@ -384,7 +397,7 @@ const Dashboard = () => {
               </div>
               <button
                 onClick={() => setIsLiveMode(!isLiveMode)}
-                className={`p-2 rounded-lg transition-colors ${
+                className={`p-2 rounded-lg transition-colors hover:cursor-pointer ${
                   isLiveMode
                     ? "bg-green-100 text-green-600"
                     : "bg-gray-100 text-gray-600"
@@ -675,7 +688,6 @@ const Dashboard = () => {
                           | "UNAUTHORIZED_EXIT"
                           | "DOUBLE_ENTRY_ATTEMPT"
                           | "NO_ENTRY_EXIT_ATTEMPT"
-                    
                       }
                     />
                   </div>
@@ -697,7 +709,7 @@ const Dashboard = () => {
                         setSelectedIncident(incident);
                         setShowDetails(true);
                       }}
-                      className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+                      className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors hover:cursor-pointer"
                     >
                       View Details
                     </button>
